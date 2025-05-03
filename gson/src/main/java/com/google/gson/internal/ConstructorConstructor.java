@@ -104,43 +104,34 @@ public final class ConstructorConstructor {
     Type type = typeToken.getType();
     Class<? super T> rawType = typeToken.getRawType();
 
-    // first try an instance creator
+    // Compute filter result once and reuse
+    FilterResult filterResult = ReflectionAccessFilterHelper.getFilterResult(reflectionFilters, rawType);
 
-    @SuppressWarnings("unchecked") // types must agree
-    InstanceCreator<T> typeCreator = (InstanceCreator<T>) instanceCreators.get(type);
-    if (typeCreator != null) {
-      return () -> typeCreator.createInstance(type);
+    // Try instance creator first
+    ObjectConstructor<T> instanceCreatorConstructor = getInstanceCreatorConstructor(type, rawType);
+    if (instanceCreatorConstructor != null) {
+      return instanceCreatorConstructor;
     }
 
-    // Next try raw type match for instance creators
-    @SuppressWarnings("unchecked") // types must agree
-    InstanceCreator<T> rawTypeCreator = (InstanceCreator<T>) instanceCreators.get(rawType);
-    if (rawTypeCreator != null) {
-      return () -> rawTypeCreator.createInstance(type);
-    }
-
-    // First consider special constructors before checking for no-args constructors
-    // below to avoid matching internal no-args constructors which might be added in
-    // future JDK versions
-    ObjectConstructor<T> specialConstructor = newSpecialCollectionConstructor(type, rawType);
+    // Try special constructors
+    ObjectConstructor<T> specialConstructor = getSpecialConstructor(type, rawType);
     if (specialConstructor != null) {
       return specialConstructor;
     }
 
-    FilterResult filterResult =
-        ReflectionAccessFilterHelper.getFilterResult(reflectionFilters, rawType);
-    ObjectConstructor<T> defaultConstructor = newDefaultConstructor(rawType, filterResult);
+    // Try default constructor
+    ObjectConstructor<T> defaultConstructor = getDefaultConstructor(rawType, filterResult);
     if (defaultConstructor != null) {
       return defaultConstructor;
     }
 
-    ObjectConstructor<T> defaultImplementation = newDefaultImplementationConstructor(type, rawType);
+    // Try default implementation constructor
+    ObjectConstructor<T> defaultImplementation = getDefaultImplementationConstructor(type, rawType);
     if (defaultImplementation != null) {
       return defaultImplementation;
     }
 
-    // Check whether type is instantiable; otherwise ReflectionAccessFilter recommendation
-    // of adjusting filter suggested below is irrelevant since it would not solve the problem
+    // Check if instantiable, else return error message
     String exceptionMessage = checkInstantiable(rawType);
     if (exceptionMessage != null) {
       return () -> {
@@ -148,21 +139,45 @@ public final class ConstructorConstructor {
       };
     }
 
+    // Handle the case where unsafe creation is not allowed
     if (!allowUnsafe) {
-      String message =
-          "Unable to create instance of "
-              + rawType
-              + "; Register an InstanceCreator or a TypeAdapter for this type.";
+      String message = "Unable to create instance of " + rawType + "; Register an InstanceCreator or a TypeAdapter for this type.";
       return () -> {
         throw new JsonIOException(message);
       };
     }
 
-    // Consider usage of Unsafe as reflection, so don't use if BLOCK_ALL
-    // Additionally, since it is not calling any constructor at all, don't use if BLOCK_INACCESSIBLE
+    // Handle ReflectionAccessFilter
+    return handleReflectionAccessFilter(rawType, filterResult);
+  }
+  // Helper method to get the instance creator constructor
+  private <T> ObjectConstructor<T> getInstanceCreatorConstructor(Type type, Class<? super T> rawType) {
+    InstanceCreator<T> typeCreator = (InstanceCreator<T>) instanceCreators.get(type);
+    if (typeCreator != null) {
+      return () -> typeCreator.createInstance(type);
+    }
+
+    InstanceCreator<T> rawTypeCreator = (InstanceCreator<T>) instanceCreators.get(rawType);
+    if (rawTypeCreator != null) {
+      return () -> rawTypeCreator.createInstance(type);
+    }
+
+    return null;
+  }
+
+  // Helper method to get special constructors
+  private <T> ObjectConstructor<T> getSpecialConstructor(Type type, Class<? super T> rawType) {
+    return newSpecialCollectionConstructor(type, rawType);
+  }
+  // Helper method to get default implementation constructor
+  private <T> ObjectConstructor<T> getDefaultImplementationConstructor(Type type, Class<? super T> rawType) {
+    return newDefaultImplementationConstructor(type, rawType);
+  }
+
+  // Helper method to handle ReflectionAccessFilter logic
+  private <T> ObjectConstructor<T> handleReflectionAccessFilter(Class<? super T> rawType, FilterResult filterResult) {
     if (filterResult != FilterResult.ALLOW) {
-      String message =
-          "Unable to create instance of "
+      String message = "Unable to create instance of "
               + rawType
               + "; ReflectionAccessFilter does not permit using reflection or Unsafe. Register an"
               + " InstanceCreator or a TypeAdapter for this type or adjust the access filter to"
@@ -172,8 +187,12 @@ public final class ConstructorConstructor {
       };
     }
 
-    // finally try unsafe
     return newUnsafeAllocator(rawType);
+  }
+
+  // helper method to accept filterResult
+  private <T> ObjectConstructor<T> getDefaultConstructor(Class<? super T> rawType, FilterResult filterResult) {
+    return newDefaultConstructor(rawType, filterResult);
   }
 
   /**
